@@ -1,0 +1,48 @@
+# name: test/sql/files.test
+# description: Reading saved Singer JSONL output (test/fixtures/fake-output.jsonl)
+# group: [singer]
+
+require vgi
+
+require-env SINGER_WORKER
+
+require-env SINGER_FIXTURES
+
+statement ok
+ATTACH 'singer' (TYPE vgi, LOCATION '{SINGER_WORKER}');
+
+query TI
+SELECT type, count(*) FROM singer.main.read_messages('{SINGER_FIXTURES}/fake-output.jsonl') GROUP BY type ORDER BY type;
+----
+ACTIVATE_VERSION	1
+RECORD	253
+SCHEMA	2
+STATE	3
+
+query ITT
+SELECT line, stream, key_properties FROM singer.main.read_messages('{SINGER_FIXTURES}/*.jsonl') WHERE type = 'SCHEMA' ORDER BY line;
+----
+2	users	[id]
+7	events	[id]
+
+query IIT
+SELECT count(*), max(id), max(ts)::VARCHAR FROM singer.main.read_records('{SINGER_FIXTURES}/fake-output.jsonl', 'events');
+----
+250	250	2026-02-01 00:04:10+00
+
+query IT
+SELECT id, address.zip FROM singer.main.read_records('{SINGER_FIXTURES}/fake-output.jsonl', 'users') ORDER BY id;
+----
+1	01000
+2	02000
+3	03000
+
+statement error
+SELECT * FROM singer.main.read_records('{SINGER_FIXTURES}/fake-output.jsonl', 'nope');
+----
+<REGEX>:.*no SCHEMA message.*
+
+statement error
+SELECT * FROM singer.main.read_messages('{SINGER_FIXTURES}/missing-*.jsonl');
+----
+<REGEX>:.*no Singer output file.*

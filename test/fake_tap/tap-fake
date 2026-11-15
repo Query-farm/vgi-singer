@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""A hermetic Singer tap for the tests. Standard library only.
+
+    tap-fake --config config.json --discover
+    tap-fake --config config.json [--catalog catalog.json] [--state state.json]
+
+Streams:
+  users    5 rows (config users_rows) covering every JSON Schema shape the worker maps.
+  events   incremental on ``id``: emits ids > the ``events`` bookmark, a STATE every
+           ``state_every`` records (config events_rows, default 2500).
+  batched  records delivered through a Meltano BATCH message (gzip JSONL file).
+
+Config keys (all optional): users_rows, events_rows, state_every, token (when set,
+config must also contain password == "s3cret" or the tap exits 2), fail_after
+(exit 3 after that many events), hang_after (stop printing after that many
+events), catalog_log (write the received catalog, state and config file mode there).
+Selection: only selected streams are synced; unselected non-automatic properties
+are left out of the records.
+"""
+
+import argparse
+import gzip
+import json
+import os
+import sys
+import tempfile
+import time
+
+USERS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "integer"},
+        "name": {"type": ["null", "string"], "description": "Display name."},
+        "email": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "created_at": {"type": ["null", "string"], "format": "date-time"},
+        "birthday": {"type": ["null", "string"], "format": "date"},
+        "score": {"type": ["null", "number"]},
+        "active": {"type": ["null", "boolean"]},
+        "address": {
+            "type": ["null", "object"],
+            "properties": {"city": {"type": ["null", "string"]}, "zip": {"type": ["null", "string"]}},
+        },
+        "tags": {"type": ["null", "array"], "items": {"type": "string"}},
+        "extra": {"type": ["null", "object"], "additionalProperties": True},
+        "mixed": {"type": ["null", "string", "integer"]},
+        "secret_note": {"type": ["null", "string"]},
+    },
+}
+EVENTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "integer"},
+        "ts": {"type": "string", "format": "date-time"},
+        "kind": {"type": ["null", "string"]},
+    },
+}
+BATCHED_SCHEMA = {"type": "object", "properties": {"n": {"type": "integer"}, "label": {"type": "string"}}}
+
+
+def metadata(props, keys, automatic=(), unsupported=(), replication_key=None):
+    root = {"inclusion": "available", "table-key-properties": list(keys)}
+    if replication_key:
+        root["valid-replication-keys"] = [replication_key]
+        root["replication-key"] = replication_key
+        root["forced-replication-method"] = "INCREMENTAL"
+    out = [{"breadcrumb": [], "metadata": root}]
+    for p in props:
+        inclusion = "automatic" if p in automatic or p in keys else "available"
+        if p in unsupported:
+            inclusion = "unsupported"
+        out.append({"breadcrumb": ["properties", p], "metadata": {"inclusion": inclusion}})
+    return out
+
+
+def catalog():
+    return {
+        "streams": [
+            {
+                "tap_stream_id": "users",
+                "stream": "users",
+                "schema": USERS_SCHEMA,
+                "key_properties": ["id"],
+                "metadata": metadata(USERS_SCHEMA["properties"], ["id"], unsupported=["secret_note"]),
+            },
+            {
+                "tap_stream_id": "events",
+                "stream": "events",
+                "schema": EVENTS_SCHEMA,
+                "key_properties": ["id"],
+                "replication_method": "INCREMENTAL",
+                "replication_key": "id",
+                "metadata": metadata(EVENTS_SCHEMA["properties"], ["id"], replication_key="id"),
+            },
+            {
+                "tap_stream_id": "batched",
+                "stream": "batched",
+                "schema": BATCHED_SCHEMA,
+                "key_properties": ["n"],
+                "metadata": metadata(BATCHED_SCHEMA["properties"], ["n"]),
+            },
+        ]
+    }
+
+
+def emit(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+
+
+def selection(cat):
+    """stream -> set of selected properties (None = stream not selected)."""
+    if cat is None:
+        return {s["tap_stream_id"]: set(s["schema"]["properties"]) for s in catalog()["streams"]}
+    out = {}
+    for s in cat["streams"]:
+        meta = {tuple(m["breadcrumb"]): m["metadata"] for m in s.get("metadata", [])}
+        if not meta.get((), {}).get("selected"):
+            continue
+        props = set()
+        for p in s["schema"]["properties"]:
+            m = meta.get(("properties", p), {})
+            if m.get("inclusion") == "automatic" or m.get("selected", True):
+                props.add(p)
+        out[s["tap_stream_id"]] = props
+    return out
+
+
+def project(record, props):
+    return {k: v for k, v in record.items() if k in props}
+
+
+def user(i):
+    return {
+        "id": i,
+        "name": f"user{i}" if i != 3 else None,
+        "email": f"u{i}@example.com",
+        "created_at": f"2026-01-0{i}T0{i}:00:00Z" if i != 2 else "2026-01-02T02:00:00+02:00",
+        "birthday": f"199{i}-0{i}-1{i}",
+        "score": i * 1.5,
+        "active": i % 2 == 1,
+        "address": {"city": f"city{i}", "zip": f"0{i}000", "ignored": 1},
+        "tags": [f"t{i}", "all"],
+        "extra": {"k": i, "nested": [i]},
+        "mixed": i if i % 2 else f"s{i}",
+        "secret_note": "never",
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--discover", action="store_true")
+    ap.add_argument("--catalog")
+    ap.add_argument("--properties")
+    ap.add_argument("--state")
+    a = ap.parse_args()
+    mode = os.stat(a.config).st_mode & 0o777
+    with open(a.config) as f:
+        config = json.load(f)
+    print(f"tap-fake starting (config mode {oct(mode)})", file=sys.stderr)
+    if config.get("token") is not None and config.get("password") != "s3cret":
+        print("tap-fake: authentication failed: wrong password", file=sys.stderr)
+        sys.exit(2)
+    if a.discover:
+        json.dump(catalog(), sys.stdout, indent=2)
+        return
+    cat = None
+    if a.catalog or a.properties:
+        with open(a.catalog or a.properties) as f:
+            cat = json.load(f)
+    state = {}
+    if a.state:
+        with open(a.state) as f:
+            state = json.load(f)
+    if config.get("catalog_log"):
+        with open(config["catalog_log"], "w") as f:
+            json.dump({"catalog": cat, "state": state, "config_mode": oct(mode)}, f)
+    selected = selection(cat)
+    # A stray log line on stdout: the worker must skip it.
+    print("INFO this line is not a Singer message")
+    if "users" in selected:
+        props = selected["users"]
+        emit({"type": "SCHEMA", "stream": "users", "schema": USERS_SCHEMA, "key_properties": ["id"]})
+        emit({"type": "ACTIVATE_VERSION", "stream": "users", "version": 1})
+        for i in range(1, int(config.get("users_rows", 5)) + 1):
+            emit(
+                {
+                    "type": "RECORD",
+                    "stream": "users",
+                    "record": project(user(i), props),
+                    "version": 1,
+                    "time_extracted": "2026-11-01T00:00:00Z",
+                }
+            )
+    if "events" in selected:
+        props = selected["events"]
+        emit(
+            {
+                "type": "SCHEMA",
+                "stream": "events",
+                "schema": EVENTS_SCHEMA,
+                "key_properties": ["id"],
+                "bookmark_properties": ["id"],
+            }
+        )
+        start = int(state.get("bookmarks", {}).get("events", {}).get("replication_key_value", 0))
+        total = int(config.get("events_rows", 2500))
+        every = int(config.get("state_every", 100))
+        sent = 0
+        for i in range(start + 1, total + 1):
+            if config.get("fail_after") is not None and sent >= int(config["fail_after"]):
+                sys.stdout.flush()
+                print("tap-fake: upstream exploded (HTTP 500)", file=sys.stderr)
+                sys.exit(3)
+            if config.get("hang_after") is not None and sent >= int(config["hang_after"]):
+                sys.stdout.flush()
+                time.sleep(3600)
+            kind = ["click", "view", "buy"][i % 3]
+            ts = f"2026-02-01T00:{(i // 60) % 60:02d}:{i % 60:02d}Z"
+            emit({"type": "RECORD", "stream": "events", "record": project({"id": i, "ts": ts, "kind": kind}, props)})
+            sent += 1
+            if i % every == 0:
+                emit({"type": "STATE", "value": {"bookmarks": {"events": {"replication_key_value": i}}}})
+        emit({"type": "STATE", "value": {"bookmarks": {"events": {"replication_key_value": max(start, total)}}}})
+    if "batched" in selected:
+        emit({"type": "SCHEMA", "stream": "batched", "schema": BATCHED_SCHEMA, "key_properties": ["n"]})
+        fd, path = tempfile.mkstemp(suffix=".json.gz")
+        os.close(fd)
+        with gzip.open(path, "wt") as f:
+            for n in range(1, 4):
+                f.write(json.dumps({"n": n, "label": f"b{n}"}) + "\n")
+        emit(
+            {
+                "type": "BATCH",
+                "stream": "batched",
+                "encoding": {"format": "jsonl", "compression": "gzip"},
+                "manifest": ["file://" + path],
+            }
+        )
+        emit({"type": "RECORD", "stream": "batched", "record": {"n": 4, "label": "inline"}})
+    sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()

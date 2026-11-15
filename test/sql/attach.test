@@ -1,0 +1,73 @@
+# name: test/sql/attach.test
+# description: ATTACH a tap with a catalog: every stream becomes a table
+# group: [singer]
+
+require vgi
+
+require-env SINGER_WORKER
+
+require-env SINGER_FAKE_TAP
+
+require-env SINGER_FIXTURES
+
+statement ok
+ATTACH 'singer' (TYPE vgi, LOCATION '{SINGER_WORKER}');
+
+statement ok
+CREATE SECRET fake (TYPE singer, CONFIG '{"events_rows": 3000}', SCOPE 'singer://tap-fake');
+
+# From a catalog file.
+statement ok
+ATTACH 'singer' AS fk (TYPE vgi, LOCATION '{SINGER_WORKER}', tap 'tap-fake', executable '{SINGER_FAKE_TAP}',
+  catalog '{SINGER_FIXTURES}/fake-catalog.json');
+
+query T
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'fk' ORDER BY table_name;
+----
+batched
+events
+users
+
+query TT
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'fk' AND table_name = 'events' ORDER BY column_index;
+----
+id	BIGINT
+ts	TIMESTAMP WITH TIME ZONE
+kind	VARCHAR
+
+# Scans resolve the singer secret (events_rows = 3000) and stream in batches.
+query II
+SELECT count(*), max(id) FROM fk.events;
+----
+3000	3000
+
+query IT
+SELECT id, kind FROM fk.events WHERE id BETWEEN 10 AND 12 ORDER BY id;
+----
+10	view
+11	buy
+12	click
+
+query IT
+SELECT u.id, e.kind FROM fk.users u JOIN fk.events e ON e.id = u.id ORDER BY u.id LIMIT 2;
+----
+1	view
+2	buy
+
+# From the catalog JSON itself, via a variable.
+statement ok
+SET VARIABLE cat = (SELECT catalog FROM singer.main.catalog('tap-fake', executable := '{SINGER_FAKE_TAP}'));
+
+statement ok
+ATTACH 'singer' AS fk2 (TYPE vgi, LOCATION '{SINGER_WORKER}', tap 'tap-fake', executable '{SINGER_FAKE_TAP}',
+  catalog getvariable('cat'));
+
+query I
+SELECT count(*) FROM fk2.users;
+----
+5
+
+statement error
+ATTACH 'singer' AS fk3 (TYPE vgi, LOCATION '{SINGER_WORKER}', tap 'tap-fake');
+----
+<REGEX>:.*needs a catalog.*

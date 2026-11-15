@@ -1,0 +1,28 @@
+# vgi-lint settings for this worker: https://github.com/Query-farm/vgi-lint-check
+# `make lint-explain`, `vgi-lint lint` in this directory, and CI's metadata job all
+# read this file. Look up a rule with `vgi-lint explain VGI123`; print the metadata tag
+# contract with `vgi-lint spec`.
+
+# The worker to attach, relative to this directory. Build it first with `make build`.
+location = ".venv/bin/vgi-singer-worker"
+
+# Gate at info: zero findings of any severity.
+fail_on = "info"
+
+# Waive a finding only with a kind and a reason, so the waiver can be audited:
+#   domain-exemption  permanent and legitimate for this worker
+#   deferred          a real defect you will fix; add expires = "YYYY-MM-DD"
+#   timing            slow or flaky because of the environment, not the metadata
+#   tooling-bug       the linter is wrong; report it upstream
+ignore = [
+  { code = "VGI520", kind = "domain-exemption", reason = "discover/catalog/read_stream/final_state/messages run a third-party Singer tap that must be installed from PyPI/git and configured with that tap's credentials in a singer secret; an agent test cannot provide either. The file readers and the scalar do have tasks." },
+]
+
+# Credential-gated: every tap-running function (discover, catalog, read_stream,
+# final_state, messages) installs a third-party tap and needs that tap's config
+# (usually API credentials) in a `singer` secret, so executing its examples would
+# install packages from the network and then fail without credentials. The static
+# metadata rules all stay on and gate at info; behaviour is covered by the SQL suite
+# (test/sql, hermetic fake tap + MeltanoLabs tap-csv) over stdio, launch and http.
+[execution]
+enabled = false

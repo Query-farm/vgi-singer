@@ -1,0 +1,94 @@
+# name: test/sql/errors.test
+# description: Secret lookup, tap failures, timeouts and bad arguments
+# group: [singer]
+
+require vgi
+
+require-env SINGER_WORKER
+
+require-env SINGER_FAKE_TAP
+
+statement ok
+ATTACH 'singer' (TYPE vgi, LOCATION '{SINGER_WORKER}');
+
+# A secret bound to another tap by scope is not used for tap-fake.
+statement ok
+CREATE SECRET other (TYPE singer, CONFIG '{"token": "x"}', SCOPE 'singer://tap-other');
+
+query I
+SELECT count(*) FROM singer.main.read_stream('tap-fake', 'users', executable := '{SINGER_FAKE_TAP}');
+----
+5
+
+statement ok
+CREATE SECRET boom (TYPE singer, CONFIG '{"fail_after": 1500}', SCOPE 'singer://tap-fake-boom');
+
+statement ok
+CREATE SECRET hang (TYPE singer, CONFIG '{"hang_after": 10}', SCOPE 'singer://tap-fake-hang');
+
+statement ok
+CREATE SECRET wrong (TYPE singer, CONFIG '{"token": "x", "password": "nope"}', SCOPE 'singer://tap-fake-wrong');
+
+statement ok
+CREATE SECRET good (TYPE singer, CONFIG '{"token": "x", "password": "s3cret"}', SCOPE 'singer://tap-fake-right');
+
+statement ok
+CREATE SECRET notjson (TYPE singer, CONFIG 'not json', SCOPE 'singer://tap-fake-notjson');
+
+# The secret is redacted in duckdb_secrets().
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE type = 'singer' AND secret_string LIKE '%s3cret%';
+----
+0
+
+# Named secret selection.
+query I
+SELECT count(*) FROM singer.main.read_stream('tap-fake', 'users', executable := '{SINGER_FAKE_TAP}', secret_name := 'good');
+----
+5
+
+statement error
+SELECT count(*) FROM singer.main.read_stream('tap-fake', 'users', executable := '{SINGER_FAKE_TAP}', secret_name := 'wrong');
+----
+<REGEX>:.*exited with code 2[\s\S]*authentication failed.*
+
+# Non-zero exit mid-stream quotes the tap's stderr.
+statement error
+SELECT count(*) FROM singer.main.read_stream('tap-fake', 'events', executable := '{SINGER_FAKE_TAP}', secret_name := 'boom');
+----
+<REGEX>:.*exited with code 3[\s\S]*upstream exploded.*
+
+statement error
+SELECT count(*) FROM singer.main.read_stream('tap-fake', 'events', executable := '{SINGER_FAKE_TAP}', secret_name := 'hang', timeout_seconds := 2);
+----
+<REGEX>:.*printed nothing for 2 seconds.*
+
+statement error
+SELECT count(*) FROM singer.main.read_stream('tap-fake', 'users', executable := '{SINGER_FAKE_TAP}', secret_name := 'notjson');
+----
+<REGEX>:.*CONFIG is not valid JSON.*
+
+statement error
+SELECT count(*) FROM singer.main.read_stream('tap-fake', 'users', executable := '{SINGER_FAKE_TAP}', secret_name := 'missing');
+----
+<REGEX>:.*no singer secret named 'missing'.*
+
+statement error
+SELECT count(*) FROM singer.main.read_stream('tap-fake', 'nope', executable := '{SINGER_FAKE_TAP}');
+----
+<REGEX>:.*no stream named 'nope'.*
+
+statement error
+SELECT count(*) FROM singer.main.read_stream('tap-fake', 'users', executable := '/nonexistent/tap');
+----
+<REGEX>:.*not an executable file.*
+
+statement error
+SELECT count(*) FROM singer.main.read_stream('tap-fake', 'users', executable := '{SINGER_FAKE_TAP}', state := '{oops');
+----
+<REGEX>:.*state is not valid JSON.*
+
+statement error
+SELECT * FROM singer.main.discover('../evil');
+----
+<REGEX>:.*

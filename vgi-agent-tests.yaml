@@ -1,0 +1,17 @@
+# Private graders for the public vgi.agent_test_tasks in the worker's catalog metadata.
+# `vgi-lint lint --ai` runs an agent on each prompt and grades it with check_sql.
+# See https://github.com/Query-farm/vgi-lint-check (VGI920).
+# The fixture URL points at the v0.1.0 tag of the repository (test/fixtures/fake-output.jsonl).
+tasks:
+  - name: saved_output_message_types
+    reference_sql: >-
+      SELECT type, count(*) AS n
+      FROM singer.main.read_messages('https://raw.githubusercontent.com/Query-farm/vgi-singer/v0.1.0/test/fixtures/fake-output.jsonl')
+      GROUP BY type ORDER BY type
+  - name: saved_output_events
+    reference_sql: >-
+      SELECT count(*) AS records
+      FROM singer.main.read_records('https://raw.githubusercontent.com/Query-farm/vgi-singer/v0.1.0/test/fixtures/fake-output.jsonl', 'events')
+  - name: schema_type_of_datetime
+    reference_sql: >-
+      SELECT singer.main.json_schema_type('{"type": ["null", "string"], "format": "date-time"}') AS duckdb_type

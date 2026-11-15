@@ -1,0 +1,45 @@
+# name: test/sql/tap_csv.test
+# description: A real tap: MeltanoLabs tap-csv, installed by pip_url into an isolated cached env
+# group: [singer]
+
+require vgi
+
+require-env SINGER_WORKER
+
+require-env SINGER_SCRATCH
+
+require-env SINGER_TAP_CSV_PIP_URL
+
+statement ok
+ATTACH 'singer' (TYPE vgi, LOCATION '{SINGER_WORKER}');
+
+statement ok
+COPY (SELECT * FROM (VALUES (1, 'alice', 10.5), (2, 'bob', NULL), (3, 'carol', 7.0)) t(id, name, amount))
+TO '{SINGER_SCRATCH}/customers.csv' (HEADER);
+
+statement ok
+COPY (SELECT * FROM (VALUES ('A', 1), ('B', 2)) t(sku, qty)) TO '{SINGER_SCRATCH}/orders.csv' (HEADER);
+
+statement ok
+CREATE SECRET csv (TYPE singer, SCOPE 'singer://tap-csv', CONFIG '{"files": [
+  {"entity": "customers", "path": "{SINGER_SCRATCH}/customers.csv", "keys": ["id"]},
+  {"entity": "orders", "path": "{SINGER_SCRATCH}/orders.csv", "keys": ["sku"]}]}');
+
+query TT
+SELECT stream, key_properties FROM singer.main.discover('tap-csv', pip_url := '{SINGER_TAP_CSV_PIP_URL}') ORDER BY stream;
+----
+customers	[id]
+orders	[sku]
+
+# tap-csv types every column as a string.
+query TTT
+SELECT id, name, amount FROM singer.main.read_stream('tap-csv', 'customers', pip_url := '{SINGER_TAP_CSV_PIP_URL}') ORDER BY id;
+----
+1	alice	10.5
+2	bob	(empty)
+3	carol	7.0
+
+query IT
+SELECT records, streams FROM singer.main.final_state('tap-csv', pip_url := '{SINGER_TAP_CSV_PIP_URL}');
+----
+5	[customers, orders]

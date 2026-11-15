@@ -1,0 +1,157 @@
+# name: test/sql/singer.test
+# description: Tap functions against the hermetic fake tap (test/fake_tap/tap-fake)
+# group: [singer]
+
+require vgi
+
+require-env SINGER_WORKER
+
+require-env SINGER_FAKE_TAP
+
+require-env SINGER_SCRATCH
+
+statement ok
+LOAD json;
+
+statement ok
+ATTACH 'singer' (TYPE vgi, LOCATION '{SINGER_WORKER}');
+
+statement ok
+CREATE SECRET fake (TYPE singer, CONFIG '{"catalog_log": "{SINGER_SCRATCH}/catalog-log.json"}', SCOPE 'singer://tap-fake');
+
+# ------------------------------------------------------------------- discover
+
+query TTTT
+SELECT tap_stream_id, key_properties, replication_method, replication_key
+FROM singer.main.discover('tap-fake', executable := '{SINGER_FAKE_TAP}') ORDER BY tap_stream_id;
+----
+batched	[n]	NULL	NULL
+events	[id]	INCREMENTAL	id
+users	[id]	NULL	NULL
+
+# JSON Schema -> DuckDB types (unsupported secret_note is not a column).
+query TT
+SELECT c.name, c.type FROM (
+  SELECT unnest(columns) AS c FROM singer.main.discover('tap-fake', executable := '{SINGER_FAKE_TAP}')
+  WHERE stream = 'users');
+----
+id	BIGINT
+name	VARCHAR
+email	VARCHAR
+created_at	TIMESTAMP WITH TIME ZONE
+birthday	DATE
+score	DOUBLE
+active	BOOLEAN
+address	STRUCT("city" VARCHAR, "zip" VARCHAR)
+tags	VARCHAR[]
+extra	JSON
+mixed	JSON
+
+query II
+SELECT streams, json_array_length(catalog->'$.streams')
+FROM singer.main.catalog('tap-fake', executable := '{SINGER_FAKE_TAP}');
+----
+3	3
+
+# ---------------------------------------------------------------- read_stream
+
+query ITTITRT
+SELECT id, name, email, epoch(created_at)::BIGINT, birthday::VARCHAR, score, active::VARCHAR
+FROM singer.main.read_stream('tap-fake', 'users', executable := '{SINGER_FAKE_TAP}') ORDER BY id;
+----
+1	user1	u1@example.com	1767229200	1991-01-11	1.5	true
+2	user2	u2@example.com	1767312000	1992-02-12	3.0	false
+3	NULL	u3@example.com	1767409200	1993-03-13	4.5	true
+4	user4	u4@example.com	1767499200	1994-04-14	6.0	false
+5	user5	u5@example.com	1767589200	1995-05-15	7.5	true
+
+# Nested shapes: STRUCT (unknown keys dropped), LIST, JSON for open objects and mixed types.
+query ITTTT
+SELECT id, address.city, tags[1], extra->>'$.k', json_type(mixed)
+FROM singer.main.read_stream('tap-fake', 'users', executable := '{SINGER_FAKE_TAP}') WHERE id <= 2 ORDER BY id;
+----
+1	city1	t1	1	UBIGINT
+2	city2	t2	2	VARCHAR
+
+query T
+SELECT typeof(created_at) FROM singer.main.read_stream('tap-fake', 'users', executable := '{SINGER_FAKE_TAP}') LIMIT 1;
+----
+TIMESTAMP WITH TIME ZONE
+
+# Projection pushdown: only the queried columns (plus the key) are selected in the tap's catalog.
+query I
+SELECT count(name) FROM singer.main.read_stream('tap-fake', 'users', executable := '{SINGER_FAKE_TAP}');
+----
+4
+
+query TT
+SELECT config_mode,
+       list_sort([m.breadcrumb[2] for m in catalog.streams[1].metadata if m.metadata.selected AND len(m.breadcrumb) = 2])
+FROM read_json('{SINGER_SCRATCH}/catalog-log.json');
+----
+0o600	[id, name]
+
+# Many batches, streamed.
+query III
+SELECT count(*), count(DISTINCT id), sum(id) FROM singer.main.read_stream('tap-fake', 'events', executable := '{SINGER_FAKE_TAP}');
+----
+2500	2500	3126250
+
+# Incremental: start from a Singer state.
+query II
+SELECT count(*), min(id) FROM singer.main.read_stream('tap-fake', 'events', executable := '{SINGER_FAKE_TAP}',
+  state := '{"bookmarks": {"events": {"replication_key_value": 2400}}}');
+----
+100	2401
+
+# Records delivered through a BATCH message (gzip JSONL manifest) plus an inline record.
+query IT
+SELECT n, label FROM singer.main.read_stream('tap-fake', 'batched', executable := '{SINGER_FAKE_TAP}') ORDER BY n;
+----
+1	b1
+2	b2
+3	b3
+4	inline
+
+# ---------------------------------------------------------------- final_state
+
+query TIIT
+SELECT final_state, records, state_messages, streams
+FROM singer.main.final_state('tap-fake', stream := 'events', executable := '{SINGER_FAKE_TAP}',
+  state := '{"bookmarks": {"events": {"replication_key_value": 2400}}}');
+----
+{"bookmarks":{"events":{"replication_key_value":2500}}}	100	2	[events]
+
+query IT
+SELECT records, streams FROM singer.main.final_state('tap-fake', executable := '{SINGER_FAKE_TAP}');
+----
+2509	[batched, events, users]
+
+# ------------------------------------------------------------------- messages
+
+query TI
+SELECT type, count(*) FROM singer.main.messages('tap-fake', executable := '{SINGER_FAKE_TAP}') GROUP BY type ORDER BY type;
+----
+ACTIVATE_VERSION	1
+BATCH	1
+RECORD	2506
+SCHEMA	3
+STATE	26
+
+query ITT
+SELECT seq, type, value FROM singer.main.messages('tap-fake', stream := 'events', executable := '{SINGER_FAKE_TAP}')
+WHERE type = 'STATE' ORDER BY seq LIMIT 1;
+----
+102	STATE	{"bookmarks":{"events":{"replication_key_value":100}}}
+
+# ---------------------------------------------------------------- the scalar
+
+query T
+SELECT singer.main.json_schema_type('{"anyOf": [{"type": "string", "format": "date"}, {"type": "null"}]}');
+----
+DATE
+
+query T
+SELECT singer.main.json_schema_type(NULL);
+----
+NULL
