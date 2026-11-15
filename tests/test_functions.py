@@ -324,3 +324,22 @@ def test_read_messages_from_url(client: Client) -> None:
             _table(client, "read_messages", url + ".missing")
     finally:
         server.shutdown()
+
+
+def test_launch_argv_runs_python_shebang_scripts_through_the_interpreter_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows cannot exec a ``#!`` script, so a Python-shebang tap runs via ``sys.executable``."""
+    import sys
+
+    native = tmp_path / "tap-native.exe"
+    native.write_bytes(b"MZ")
+    other = tmp_path / "tap-shell"
+    other.write_text("#!/bin/sh\necho hi\n")
+    if sys.platform != "win32":
+        assert tapmod._launch_argv(FAKE_TAP) == [FAKE_TAP]
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    assert tapmod._launch_argv(FAKE_TAP) == [sys.executable, FAKE_TAP]
+    assert tapmod._launch_argv(str(native)) == [str(native)]
+    assert tapmod._launch_argv(str(other)) == [str(other)]

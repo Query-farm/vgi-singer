@@ -77,6 +77,12 @@ start_server() {
 export SINGER_FAKE_TAP="$REPO/test/fake_tap/tap-fake"
 export SINGER_FIXTURES="$REPO/test/fixtures"
 export SINGER_SCRATCH="$STAGE/scratch"
+# The permission bits the tap sees on its config file. POSIX gets 0600; Windows has
+# no owner-only mode bits (os.chmod only toggles read-only), so it reports 0666.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) export SINGER_CONFIG_MODE="0o666" ;;
+  *) export SINGER_CONFIG_MODE="0o600" ;;
+esac
 mkdir -p "$SINGER_SCRATCH"
 export VGI_SINGER_CACHE_DIR="${VGI_SINGER_CACHE_DIR:-$REPO/.tools/singer-cache}"
 

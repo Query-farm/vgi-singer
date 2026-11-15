@@ -121,6 +121,28 @@ def _venv_bin(venv: Path, name: str) -> Path:
     return venv / "bin" / name
 
 
+def _launch_argv(exe: str) -> list[str]:
+    """Argv prefix that runs ``exe``; on Windows a Python shebang script runs through this interpreter.
+
+    Windows cannot execute ``#!`` scripts directly (``WinError 193``), so an
+    ``executable`` that is not a native program (no ``PATHEXT`` suffix) but starts
+    with a Python shebang is handed to ``sys.executable``. POSIX runs ``exe`` as is.
+    """
+    if sys.platform != "win32":
+        return [exe]
+    native = {e.lower() for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e}
+    if Path(exe).suffix.lower() in native:
+        return [exe]
+    try:
+        with open(exe, "rb") as fh:
+            first = fh.readline(256)
+    except OSError:
+        return [exe]
+    if first.startswith(b"#!") and b"python" in first:
+        return [sys.executable, exe]
+    return [exe]
+
+
 def cache_dir() -> Path:
     """Where tap environments live: ``$VGI_SINGER_CACHE_DIR`` or the user cache directory."""
     explicit = os.environ.get(CACHE_ENV_VAR)
@@ -226,7 +248,7 @@ def discover(spec: TapSpec, config: str, timeout_seconds: int = DEFAULT_TIMEOUT_
     with private_file(config, ".config.json") as config_path:
         try:
             proc = subprocess.run(
-                [exe, "--config", config_path, "--discover"],
+                [*_launch_argv(exe), "--config", config_path, "--discover"],
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds or None,
@@ -293,7 +315,7 @@ class TapRun:
         """Write the config/catalog/state files and start the tap."""
         exe = resolve_executable(spec)
         files = [_private_path(config, ".config.json")]
-        cmd = [exe, "--config", files[0]]
+        cmd = [*_launch_argv(exe), "--config", files[0]]
         if catalog is not None:
             files.append(_private_path(json.dumps(catalog), ".catalog.json"))
             cmd += ["--catalog", files[-1]]

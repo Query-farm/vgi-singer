@@ -10,6 +10,8 @@ require-env SINGER_FAKE_TAP
 
 require-env SINGER_SCRATCH
 
+require-env SINGER_CONFIG_MODE
+
 statement ok
 LOAD json;
 
@@ -85,11 +87,11 @@ SELECT count(name) FROM singer.main.read_stream('tap-fake', 'users', executable 
 4
 
 query TT
-SELECT config_mode,
+SELECT config_mode = '{SINGER_CONFIG_MODE}',
        list_sort([m.breadcrumb[2] for m in catalog.streams[1].metadata if m.metadata.selected AND len(m.breadcrumb) = 2])
 FROM read_json('{SINGER_SCRATCH}/catalog-log.json');
 ----
-0o600	[id, name]
+true	[id, name]
 
 # Many batches, streamed.
 query III
