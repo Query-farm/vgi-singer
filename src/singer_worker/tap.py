@@ -30,7 +30,6 @@ from __future__ import annotations
 import atexit
 import collections
 import contextlib
-import fcntl
 import hashlib
 import json
 import logging
@@ -86,6 +85,42 @@ class TapSpec:
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+@contextlib.contextmanager
+def _exclusive_lock(path: Path) -> Iterator[None]:
+    """Hold an exclusive cross-process lock on ``path`` (fcntl on POSIX, msvcrt on Windows)."""
+    with open(path, "a+") as fh:
+        if sys.platform == "win32":
+            import msvcrt
+
+            fh.seek(0)
+            while True:
+                try:
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError:  # LK_LOCK gives up after ~10 s; keep waiting
+                    continue
+            try:
+                yield
+            finally:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _venv_bin(venv: Path, name: str) -> Path:
+    """Path of a console script or interpreter inside a virtual environment, per platform."""
+    if sys.platform == "win32":
+        return venv / "Scripts" / f"{name}.exe"
+    return venv / "bin" / name
+
+
 def cache_dir() -> Path:
     """Where tap environments live: ``$VGI_SINGER_CACHE_DIR`` or the user cache directory."""
     explicit = os.environ.get(CACHE_ENV_VAR)
@@ -113,12 +148,11 @@ def resolve_executable(spec: TapSpec) -> str:
             raise TapError(f"executable {spec.executable!r} is not an executable file")
         return str(path)
     env_dir = cache_dir() / "taps" / f"{spec.tap}-{spec.key}"
-    exe = env_dir / "venv" / "bin" / spec.tap
+    exe = _venv_bin(env_dir / "venv", spec.tap)
     if exe.is_file():
         return str(exe)
     env_dir.mkdir(parents=True, exist_ok=True)
-    with open(env_dir / ".lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with _exclusive_lock(env_dir / ".lock"):
         if exe.is_file():
             return str(exe)
         venv = env_dir / "venv"
@@ -131,7 +165,7 @@ def resolve_executable(spec: TapSpec) -> str:
                 venv_cmd += ["--python", spec.python]
             _run_install(venv_cmd, f"create an environment for {spec.tap}")
             _run_install(
-                [uv, "pip", "install", "--quiet", "--python", str(venv / "bin" / "python"), *requirement.split()],
+                [uv, "pip", "install", "--quiet", "--python", str(_venv_bin(venv, "python")), *requirement.split()],
                 f"install {requirement}",
             )
         else:
@@ -140,7 +174,7 @@ def resolve_executable(spec: TapSpec) -> str:
                 raise TapError(f"python {spec.python} is not installed")
             _run_install([python, "-m", "venv", str(venv)], f"create an environment for {spec.tap}")
             _run_install(
-                [str(venv / "bin" / "pip"), "install", "--quiet", *requirement.split()], f"install {requirement}"
+                [str(_venv_bin(venv, "pip")), "install", "--quiet", *requirement.split()], f"install {requirement}"
             )
         if not exe.is_file():
             shutil.rmtree(venv, ignore_errors=True)
