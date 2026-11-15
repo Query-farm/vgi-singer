@@ -90,6 +90,10 @@ def message_batch(rows: list[dict[str, Any]], schema: pa.Schema, coercer: Coerce
 
 def _local_path(url: str) -> Path:
     parsed = urllib.parse.urlparse(url)
+    netloc = parsed.netloc
+    if parsed.scheme == "file" and len(netloc) >= 2 and netloc[0].isalpha() and netloc[1] == ":":
+        # "file://" + a Windows path (file://C:\dir\f.gz): the drive lands in the netloc.
+        return Path(urllib.parse.unquote(url[len("file://") :]))
     if parsed.scheme in ("", "file"):
         return Path(urllib.request.url2pathname(parsed.path) if parsed.scheme else url)
     raise ValueError(f"BATCH file {url!r} is not a local file; only file:// manifests are supported")

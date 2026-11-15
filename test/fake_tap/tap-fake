@@ -25,6 +25,7 @@ import os
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 USERS_SCHEMA = {
     "type": "object",
@@ -233,7 +234,7 @@ def main():
                 "type": "BATCH",
                 "stream": "batched",
                 "encoding": {"format": "jsonl", "compression": "gzip"},
-                "manifest": ["file://" + path],
+                "manifest": [Path(path).as_uri()],
             }
         )
         emit({"type": "RECORD", "stream": "batched", "record": {"n": 4, "label": "inline"}})

@@ -343,3 +343,15 @@ def test_launch_argv_runs_python_shebang_scripts_through_the_interpreter_on_wind
     assert tapmod._launch_argv(FAKE_TAP) == [sys.executable, FAKE_TAP]
     assert tapmod._launch_argv(str(native)) == [str(native)]
     assert tapmod._launch_argv(str(other)) == [str(other)]
+
+
+def test_batch_manifest_paths() -> None:
+    """file:// manifests resolve to local paths, including the bare ``file://`` + Windows-path form."""
+    from singer_worker.messages import _local_path
+
+    assert _local_path("file:///tmp/users-0001.json.gz") == Path("/tmp/users-0001.json.gz")
+    assert _local_path("/tmp/x.json.gz") == Path("/tmp/x.json.gz")
+    assert str(_local_path("file://C:\\Users\\me\\x.json.gz")) == str(Path("C:\\Users\\me\\x.json.gz"))
+    assert str(_local_path("file://D:/a/x.json.gz")) == str(Path("D:/a/x.json.gz"))
+    with pytest.raises(ValueError):
+        _local_path("s3://bucket/x.json.gz")
