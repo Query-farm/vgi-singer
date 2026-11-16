@@ -30,7 +30,7 @@ DuckDB and returns their streams as typed tables.
 ```sql
 INSTALL vgi FROM community;
 LOAD vgi;
-ATTACH 'singer' (TYPE vgi, LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-singer@v0.1.0 vgi-singer-worker');
+ATTACH 'singer' (TYPE vgi, LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-singer@v0.1.1 vgi-singer-worker');
 
 -- The tap's config: exactly what the tap reads from --config.
 CREATE SECRET csv (TYPE singer, SCOPE 'singer://tap-csv', CONFIG '{
