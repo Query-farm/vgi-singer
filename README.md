@@ -30,7 +30,7 @@ DuckDB and returns their streams as typed tables.
 ```sql
 INSTALL vgi FROM community;
 LOAD vgi;
-ATTACH 'singer' (TYPE vgi, LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-singer@v0.1.1 vgi-singer-worker');
+ATTACH 'singer' (TYPE vgi, LOCATION 'uvx --from git+https://github.com/Query-farm/vgi-singer@v0.2.0 vgi-singer-worker');
 
 -- The tap's config: exactly what the tap reads from --config.
 CREATE SECRET csv (TYPE singer, SCOPE 'singer://tap-csv', CONFIG '{
@@ -46,6 +46,8 @@ SELECT * FROM singer.main.read_stream('tap-csv', 'customers',
 ```
 
 From a source checkout: `make build`, then `LOCATION '/abs/path/to/.venv/bin/vgi-singer-worker'`.
+
+vgi-singer 0.2.0 speaks VGI protocol 3.4, so it needs Haybarn 2.0.1 or newer (Haybarn 2.0.0 loads a 3.3 `vgi` extension that cannot attach it).
 
 ## Functions
 
